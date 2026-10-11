@@ -1,0 +1,202 @@
+/*
+  KPL registrations backend (Google Apps Script)
+
+  SETUP (one time):
+  1. Open https://sheets.google.com and create a new blank sheet. Name it "KPL Registrations".
+  2. Menu: Extensions > Apps Script. Delete everything there and paste this whole file.
+  3. Change ADMIN_PIN below to your own secret PIN.
+  4. Click Deploy > New deployment > type: Web app.
+       Execute as: Me
+       Who has access: Anyone
+     Click Deploy and allow the permissions.
+  5. Copy the "Web app URL" and paste it into main.js as BACKEND_URL.
+  Every time you change this script, use Deploy > Manage deployments > Edit > New version.
+
+  What this version adds:
+  - rejects a mobile number that is already registered
+  - stores the Transaction ID / UTR and allows each one only once
+  - checks name, village, mobile, role and date of birth on the server too
+  - stops spreadsheet formulas from being typed into the sheet
+  - locks organiser actions for 10 minutes after 5 wrong PIN attempts
+*/
+
+const ADMIN_PIN = "1234";      // CHANGE THIS
+const FEE = 800;
+const MIN_AGE = 10;
+const MAX_AGE = 70;
+const MAX_TRIES = 5;
+const ROLES = ["Batsman", "Bowler", "Wicketkeeper", "All-Rounder"];
+const HEAD = ["id", "name", "mobile", "email", "dob", "role", "village", "amount", "status", "date", "utr"];
+
+const NAME_RE = /^[\p{L}\p{M}][\p{L}\p{M} .'\-]{1,59}$/u;
+const VILLAGE_RE = /^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} .,'\-\/]{1,59}$/u;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const MOBILE_RE = /^[6-9][0-9]{9}$/;
+const UTR_RE = /^[A-Za-z0-9]{8,30}$/;
+
+function sheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName("Registrations");
+  if (!sh) {
+    sh = ss.insertSheet("Registrations");
+    sh.appendRow(HEAD);
+  }
+  // sheets made by the older script have no utr column yet
+  if (sh.getRange(1, HEAD.length).getValue() === "") {
+    sh.getRange(1, HEAD.length).setValue("utr");
+  }
+  return sh;
+}
+
+function rows_() {
+  const v = sheet_().getDataRange().getValues();
+  const head = v.shift();
+  return v.map(function (r, i) {
+    const o = { row: i + 2 };
+    head.forEach(function (k, j) {
+      o[k] = r[j] instanceof Date
+        ? Utilities.formatDate(r[j], Session.getScriptTimeZone(), "dd/MM/yyyy")
+        : String(r[j] === undefined ? "" : r[j]);
+    });
+    return o;
+  });
+}
+
+function out_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function fail_(message) {
+  return out_({ ok: false, error: message });
+}
+
+/* clean text: no control characters, no double spaces, limited length */
+function txt_(v, max) {
+  return String(v == null ? "" : v)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+/* a leading apostrophe makes Sheets keep the value as plain text (no formulas) */
+function lit_(v) {
+  return "'" + v;
+}
+
+function ageOf_(dob) {
+  const b = new Date(dob + "T00:00:00");
+  if (isNaN(b.getTime())) return null;
+  const n = new Date();
+  let a = n.getFullYear() - b.getFullYear();
+  const m = n.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && n.getDate() < b.getDate())) a--;
+  return a;
+}
+
+function pub_(r) {
+  return { name: r.name, role: r.role, village: r.village, date: r.date };
+}
+
+function paid_() {
+  return out_({ ok: true, rows: rows_().filter(function (r) { return r.status === "paid"; }).map(pub_) });
+}
+
+/* organiser PIN with a lock after too many wrong tries */
+function pinCheck_(pin) {
+  const cache = CacheService.getScriptCache();
+  const tries = Number(cache.get("pin_tries") || 0);
+  if (tries >= MAX_TRIES) return "locked";
+  if (String(pin) === ADMIN_PIN) {
+    cache.remove("pin_tries");
+    return "ok";
+  }
+  cache.put("pin_tries", String(tries + 1), 600);
+  return "wrong";
+}
+
+function doGet() {
+  return paid_();
+}
+
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const d = JSON.parse(e.postData.contents);
+    const sh = sheet_();
+
+    if (d.action === "register") {
+      const p = d.player || {};
+      const name = txt_(p.name, 60);
+      const mobile = txt_(p.mobile, 10);
+      const email = txt_(p.email, 80);
+      const dob = txt_(p.dob, 10);
+      const role = txt_(p.role, 20);
+      const village = txt_(p.village, 60);
+
+      if (!NAME_RE.test(name)) return fail_("Please enter a valid name.");
+      if (!MOBILE_RE.test(mobile)) return fail_("Please enter a valid 10-digit mobile number.");
+      if (email && !EMAIL_RE.test(email)) return fail_("Please enter a valid email address.");
+      if (ROLES.indexOf(role) < 0) return fail_("Please select a playing role.");
+      if (!VILLAGE_RE.test(village)) return fail_("Please enter a valid village or area.");
+
+      const age = /^\d{4}-\d{2}-\d{2}$/.test(dob) ? ageOf_(dob) : null;
+      if (age === null || age < MIN_AGE || age > MAX_AGE) {
+        return fail_("Please check the date of birth (age " + MIN_AGE + " to " + MAX_AGE + ").");
+      }
+
+      if (rows_().some(function (r) { return r.mobile === mobile; })) {
+        return fail_("This mobile number is already registered. If you need help, please contact the organisers.");
+      }
+
+      const id = "r" + Date.now() + Math.floor(Math.random() * 1000);
+      const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy");
+      sh.appendRow([id, lit_(name), lit_(mobile), lit_(email), lit_(dob), lit_(role), lit_(village), FEE, "pending", lit_(today), ""]);
+      return out_({ ok: true, id: id });
+    }
+
+    if (d.action === "status" || d.action === "submitted") {
+      const r = rows_().find(function (x) { return x.id === String(d.id); });
+      if (!r) return fail_("Registration not found");
+
+      if (d.action === "submitted" && r.status === "pending") {
+        const utr = txt_(d.utr, 30).replace(/\s/g, "");
+        if (!UTR_RE.test(utr)) return fail_("Please enter a valid Transaction ID / UTR.");
+
+        const used = rows_().some(function (x) {
+          return x.id !== r.id && String(x.utr).toLowerCase() === utr.toLowerCase();
+        });
+        if (used) return fail_("This Transaction ID is already used for another registration.");
+
+        sh.getRange(r.row, 9).setValue("submitted");
+        sh.getRange(r.row, 11).setValue(lit_(utr));
+        r.status = "submitted";
+      }
+      return out_({ ok: true, status: r.status });
+    }
+
+    if (d.action === "listPaid") return paid_();
+
+    // everything below needs the organiser PIN
+    const pin = pinCheck_(d.pin);
+    if (pin === "locked") return fail_("Too many wrong PIN attempts. Try again after 10 minutes.");
+    if (pin !== "ok") return fail_("Wrong PIN");
+
+    if (d.action === "adminList") return out_({ ok: true, rows: rows_() });
+
+    if (d.action === "approve" || d.action === "delete") {
+      const r = rows_().find(function (x) { return x.id === String(d.id); });
+      if (!r) return fail_("Registration not found");
+      if (d.action === "approve") sh.getRange(r.row, 9).setValue("paid");
+      else sh.deleteRow(r.row);
+      return out_({ ok: true });
+    }
+
+    return fail_("Unknown action");
+  } catch (err) {
+    return fail_("Server error. Please try again.");
+  } finally {
+    lock.releaseLock();
+  }
+}

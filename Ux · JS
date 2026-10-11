@@ -1,0 +1,490 @@
+/*
+  KPL Karvetinagar Premier League - experience layer
+
+  Everything here is OPTIONAL polish. If a library does not load
+  (slow internet, blocked CDN) the website still works normally.
+
+  Used:
+    Lenis        smooth, inertia scrolling
+    GSAP         timeline animation + ScrollTrigger (scroll reveals, counters, parallax)
+    Three.js     lightweight 3D cricket ball + gold particles in the hero (WebGL)
+
+  The 3D ball and heavy animation are skipped for people who:
+    - turned on "reduce motion" in their phone / computer
+    - use Data Saver
+    - have a slow phone (fewer than 4 CPU cores)
+*/
+
+(function () {
+
+  "use strict";
+
+  var reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  var saveData = !!(navigator.connection && navigator.connection.saveData);
+  var cores = navigator.hardwareConcurrency || 4;
+
+  var lenis = null;
+
+  var LIBS = {
+    gsap: "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js",
+    scrollTrigger: "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js",
+    lenis: "https://cdn.jsdelivr.net/npm/lenis@1.1.13/dist/lenis.min.js",
+    three: "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+  };
+
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error("Could not load " + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+
+  /* ===== 1. SCROLL PROGRESS BAR (no library) ===== */
+
+  function initProgressBar() {
+
+    var bar = document.createElement("div");
+    bar.id = "scrollProgress";
+    document.body.appendChild(bar);
+
+    var ticking = false;
+
+    function update() {
+      var max = document.documentElement.scrollHeight - window.innerHeight;
+      var ratio = max > 0 ? Math.min(1, Math.max(0, window.scrollY / max)) : 0;
+      bar.style.transform = "scaleX(" + ratio + ")";
+      ticking = false;
+    }
+
+    window.addEventListener("scroll", function () {
+      if (!ticking) {
+        ticking = true;
+        window.requestAnimationFrame(update);
+      }
+    }, { passive: true });
+
+    update();
+
+  }
+
+
+  /* ===== 2. HIGHLIGHT THE MENU BUTTON OF THE SECTION YOU ARE IN ===== */
+
+  function initActiveMenu() {
+
+    var links = Array.prototype.slice.call(document.querySelectorAll(".menu a"));
+
+    if (!links.length) { return; }
+
+    var targets = links.map(function (a) {
+      return document.querySelector(a.getAttribute("href"));
+    });
+
+    var ticking = false;
+
+    function update() {
+
+      var line = window.innerHeight * 0.35;
+      var current = 0;
+
+      targets.forEach(function (el, i) {
+        if (el && el.getBoundingClientRect().top <= line) { current = i; }
+      });
+
+      links.forEach(function (a, i) {
+        a.classList.toggle("active", i === current);
+      });
+
+      ticking = false;
+
+    }
+
+    window.addEventListener("scroll", function () {
+      if (!ticking) {
+        ticking = true;
+        window.requestAnimationFrame(update);
+      }
+    }, { passive: true });
+
+    update();
+
+  }
+
+
+  /* ===== 3. SMOOTH SCROLL (Lenis) + ANCHOR LINKS ===== */
+
+  function scrollToTarget(selector) {
+
+    var el = document.querySelector(selector);
+
+    if (!el) { return; }
+
+    if (lenis) { lenis.scrollTo(el, { offset: -8, duration: 1.2 }); }
+    else { el.scrollIntoView({ behavior: "smooth" }); }
+
+  }
+
+  function initAnchors() {
+
+    document.addEventListener("click", function (e) {
+
+      var a = e.target.closest ? e.target.closest('a[href^="#"]') : null;
+
+      if (!a) { return; }
+
+      var href = a.getAttribute("href");
+
+      if (!href || href.length < 2) { return; }
+
+      var el = document.querySelector(href);
+
+      if (!el) { return; }
+
+      e.preventDefault();
+
+      scrollToTarget(href);
+
+    });
+
+  }
+
+  function initLenis() {
+
+    if (typeof window.Lenis === "undefined") { return; }
+
+    lenis = new window.Lenis({ duration: 1.1, smoothWheel: true });
+
+    if (window.gsap && window.ScrollTrigger) {
+
+      lenis.on("scroll", window.ScrollTrigger.update);
+
+      window.gsap.ticker.add(function (time) { lenis.raf(time * 1000); });
+
+      window.gsap.ticker.lagSmoothing(0);
+
+    } else {
+
+      var raf = function (time) {
+        lenis.raf(time);
+        window.requestAnimationFrame(raf);
+      };
+
+      window.requestAnimationFrame(raf);
+
+    }
+
+  }
+
+
+  /* ===== 4. GSAP: ENTRANCE, SCROLL REVEALS, PARALLAX, COUNTERS ===== */
+
+  function initGsap() {
+
+    var gsap = window.gsap;
+    var ScrollTrigger = window.ScrollTrigger;
+
+    if (!gsap || !ScrollTrigger) { return; }
+
+    gsap.registerPlugin(ScrollTrigger);
+
+    /* hero entrance */
+
+    var intro = gsap.timeline({ defaults: { ease: "power3.out" } });
+
+    intro
+      .from(".hero nav", { y: -30, opacity: 0, duration: 0.7, clearProps: "all" })
+      .from(".hero .tag", { y: 20, opacity: 0, duration: 0.5, clearProps: "all" }, "-=0.3")
+      .from(".hero h1", { y: 40, opacity: 0, duration: 0.8, clearProps: "all" }, "-=0.3")
+      .from(".hero-content p:not(.tag)", { y: 20, opacity: 0, duration: 0.6, clearProps: "all" }, "-=0.4")
+      .from(".hero .btn", { y: 20, opacity: 0, duration: 0.5, clearProps: "all" }, "-=0.3");
+
+    /* gentle parallax of the hero while scrolling down */
+
+    gsap.to(".hero-content", {
+      yPercent: -6,
+      ease: "none",
+      scrollTrigger: {
+        trigger: ".hero",
+        start: "top top",
+        end: "bottom top",
+        scrub: true
+      }
+    });
+
+    /* each section fades up when it comes into view */
+
+    gsap.utils.toArray(".section, .stats").forEach(function (el) {
+      gsap.from(el, {
+        y: 40,
+        opacity: 0,
+        duration: 0.8,
+        ease: "power3.out",
+        clearProps: "all",
+        scrollTrigger: { trigger: el, start: "top 88%", once: true }
+      });
+    });
+
+    /* small cards pop in one after another */
+
+    ScrollTrigger.batch(".fx-day, .gallery-grid img, .person-card, .c-item", {
+      start: "top 92%",
+      once: true,
+      onEnter: function (batch) {
+        gsap.from(batch, {
+          y: 24,
+          opacity: 0,
+          duration: 0.6,
+          stagger: 0.08,
+          ease: "power2.out",
+          clearProps: "all"
+        });
+      }
+    });
+
+    /* numbers count up when they change */
+
+    initCounters(gsap);
+
+    window.addEventListener("load", function () { ScrollTrigger.refresh(); });
+
+  }
+
+  function initCounters(gsap) {
+
+    ["playerCount", "totalAmount", "todayCount"].forEach(function (id) {
+
+      var el = document.getElementById(id);
+
+      if (!el || typeof MutationObserver === "undefined") { return; }
+
+      var last = el.textContent;
+      var busy = false;
+
+      new MutationObserver(function () {
+
+        if (busy) { return; }
+
+        var now = el.textContent;
+
+        if (now === last) { return; }
+
+        var from = parseInt(String(last).replace(/\D/g, ""), 10) || 0;
+        var to = parseInt(String(now).replace(/\D/g, ""), 10) || 0;
+        var rupee = String(now).indexOf("₹") === 0;
+        var target = now;
+
+        last = now;
+        busy = true;
+
+        var counter = { value: from };
+
+        gsap.to(counter, {
+          value: to,
+          duration: 1,
+          ease: "power2.out",
+          onUpdate: function () {
+            var n = Math.round(counter.value).toLocaleString("en-IN");
+            el.textContent = (rupee ? "₹" : "") + n;
+          },
+          onComplete: function () {
+            el.textContent = target;
+            busy = false;
+          }
+        });
+
+      }).observe(el, { childList: true, characterData: true, subtree: true });
+
+    });
+
+  }
+
+
+  /* ===== 5. THREE.JS: 3D CRICKET BALL + GOLD PARTICLES ===== */
+
+  function initHero3D() {
+
+    var THREE = window.THREE;
+    var host = document.querySelector(".trophy");
+
+    if (!THREE || !host) { return; }
+
+    /* the hero picture is hidden on small phones, so skip the 3D there too */
+    if (host.offsetWidth === 0 && host.offsetHeight === 0 && window.innerWidth < 700) { return; }
+
+    var renderer;
+
+    try {
+
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+        powerPreference: "low-power"
+      });
+
+    } catch (e) {
+      return;
+    }
+
+    var size = Math.min(host.clientWidth || 340, 380);
+
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(size, size);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+
+    var canvas = renderer.domElement;
+    canvas.className = "hero-3d";
+    canvas.setAttribute("aria-hidden", "true");
+
+    host.classList.add("has-3d");
+    host.appendChild(canvas);
+
+    var scene = new THREE.Scene();
+
+    var camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+    camera.position.z = 7;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+
+    var key = new THREE.DirectionalLight(0xffd36b, 1.1);
+    key.position.set(4, 5, 6);
+    scene.add(key);
+
+    var rim = new THREE.DirectionalLight(0x4d7cff, 0.7);
+    rim.position.set(-5, -2, -4);
+    scene.add(rim);
+
+    /* the ball */
+
+    var ball = new THREE.Group();
+
+    var shell = new THREE.Mesh(
+      new THREE.SphereGeometry(1.6, 48, 48),
+      new THREE.MeshStandardMaterial({ color: 0xb3141b, roughness: 0.38, metalness: 0.1 })
+    );
+
+    ball.add(shell);
+
+    /* the raised seam: three thin rings around the ball */
+
+    var seamMaterial = new THREE.MeshStandardMaterial({ color: 0xf5ecd7, roughness: 0.6 });
+
+    [-0.14, 0, 0.14].forEach(function (offset) {
+      var radius = Math.sqrt(1.6 * 1.6 - offset * offset);
+      var ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.028, 8, 120), seamMaterial);
+      ring.position.z = offset;
+      ball.add(ring);
+    });
+
+    ball.rotation.x = 0.5;
+    scene.add(ball);
+
+    /* gold particles */
+
+    var count = 220;
+    var positions = new Float32Array(count * 3);
+
+    for (var i = 0; i < count; i++) {
+
+      var radius = 3 + Math.random() * 3;
+      var theta = Math.random() * Math.PI * 2;
+      var phi = Math.acos(2 * Math.random() - 1);
+
+      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = radius * Math.cos(phi);
+
+    }
+
+    var geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+    var dust = new THREE.Points(
+      geometry,
+      new THREE.PointsMaterial({ color: 0xf5c542, size: 0.05, transparent: true, opacity: 0.8 })
+    );
+
+    scene.add(dust);
+
+    /* follow the finger / mouse a little */
+
+    var targetX = 0;
+    var targetY = 0;
+
+    window.addEventListener("pointermove", function (e) {
+      targetY = (e.clientX / window.innerWidth - 0.5) * 1.2;
+      targetX = (e.clientY / window.innerHeight - 0.5) * 0.8;
+    }, { passive: true });
+
+    /* draw only while the hero is on screen and the tab is open */
+
+    var visible = true;
+
+    if (typeof IntersectionObserver !== "undefined") {
+      new IntersectionObserver(function (entries) {
+        visible = entries[0].isIntersecting;
+      }).observe(host);
+    }
+
+    function frame() {
+
+      window.requestAnimationFrame(frame);
+
+      if (!visible || document.hidden) { return; }
+
+      ball.rotation.y += 0.012;
+      ball.rotation.x += (0.5 + targetX - ball.rotation.x) * 0.04;
+      ball.position.x += (targetY - ball.position.x) * 0.04;
+
+      dust.rotation.y += 0.0015;
+      dust.rotation.x += 0.0006;
+
+      renderer.render(scene, camera);
+
+    }
+
+    frame();
+
+  }
+
+
+  /* ===== START ===== */
+
+  window.KPL_UX = { scrollTo: scrollToTarget };
+
+  initProgressBar();
+  initActiveMenu();
+  initAnchors();
+
+  if (reduceMotion) { return; }
+
+  /* load the animation libraries after the page is ready */
+
+  function startLibraries() {
+
+    var chain = loadScript(LIBS.gsap)
+      .then(function () { return loadScript(LIBS.scrollTrigger); })
+      .then(function () { return loadScript(LIBS.lenis).catch(function () { /* Lenis is optional */ }); })
+      .then(function () {
+        initLenis();
+        initGsap();
+      })
+      .catch(function () { /* the site works without animations */ });
+
+    if (!saveData && cores >= 4) {
+      chain.then(function () {
+        return loadScript(LIBS.three).then(initHero3D).catch(function () { /* 3D is optional */ });
+      });
+    }
+
+  }
+
+  if (document.readyState === "complete") { startLibraries(); }
+  else { window.addEventListener("load", startLibraries); }
+
+})();
