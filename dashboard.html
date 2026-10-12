@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HOD dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Complaints Dashboard</h1>
+    <a href="#" id="logout">Log out</a>
+  </header>
+  <main class="wide">
+    <div class="stats">
+      <div class="stat pending"><b id="nPending">0</b>Pending</div>
+      <div class="stat progress"><b id="nProgress">0</b>In Progress</div>
+      <div class="stat fixed"><b id="nFixed">0</b>Fixed</div>
+    </div>
+
+    <div class="filters">
+      <select id="fType">
+        <option value="">All issues</option>
+        <option>Fan</option><option>Light</option><option>AC</option><option>Bench</option><option>Other</option>
+      </select>
+      <select id="fStatus">
+        <option value="">All status</option>
+        <option>Pending</option><option>In Progress</option><option>Fixed</option>
+      </select>
+      <input id="fRoom" placeholder="Search class / room" style="width:auto;min-width:200px">
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Class / Room</th><th>Issue</th><th>Details</th><th>Student</th><th>Status</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty" hidden>No complaints found.</div>
+    </div>
+  </main>
+
+  <script>
+    const token = sessionStorage.getItem("hodToken");
+    if (!token) location.href = "login.html";
+
+    const headers = { "Content-Type": "application/json", Authorization: "Bearer " + token };
+    let all = [];
+
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    async function load() {
+      const res = await fetch("/api/complaints", { headers });
+      if (res.status === 401) { sessionStorage.removeItem("hodToken"); location.href = "login.html"; return; }
+      all = await res.json();
+      render();
+    }
+
+    function render() {
+      const t = document.getElementById("fType").value;
+      const s = document.getElementById("fStatus").value;
+      const r = document.getElementById("fRoom").value.toLowerCase();
+
+      document.getElementById("nPending").textContent = all.filter((c) => c.status === "Pending").length;
+      document.getElementById("nProgress").textContent = all.filter((c) => c.status === "In Progress").length;
+      document.getElementById("nFixed").textContent = all.filter((c) => c.status === "Fixed").length;
+
+      const list = all.filter((c) => (!t || c.type === t) && (!s || c.status === s) && (!r || c.room.toLowerCase().includes(r)));
+      document.getElementById("empty").hidden = list.length > 0;
+
+      document.getElementById("rows").innerHTML = list.map((c) => `
+        <tr>
+          <td>${new Date(c.date).toLocaleDateString()}</td>
+          <td>${esc(c.room)}</td>
+          <td>${esc(c.type)}</td>
+          <td>${esc(c.description)}</td>
+          <td>${esc(c.name || "-")}</td>
+          <td>
+            <span class="badge ${c.status.replace(" ", "-")}">${c.status}</span><br>
+            <select data-id="${c.id}" aria-label="Change status">
+              ${["Pending", "In Progress", "Fixed"].map((x) => `<option ${x === c.status ? "selected" : ""}>${x}</option>`).join("")}
+            </select>
+          </td>
+        </tr>`).join("");
+    }
+
+    document.getElementById("rows").addEventListener("change", async (e) => {
+      if (!e.target.dataset.id) return;
+      await fetch("/api/complaints/" + e.target.dataset.id, {
+        method: "PATCH", headers, body: JSON.stringify({ status: e.target.value }),
+      });
+      load();
+    });
+
+    ["fType", "fStatus"].forEach((id) => document.getElementById(id).onchange = render);
+    document.getElementById("fRoom").oninput = render;
+    document.getElementById("logout").onclick = (e) => {
+      e.preventDefault();
+      sessionStorage.removeItem("hodToken");
+      location.href = "login.html";
+    };
+
+    load();
+  </script>
+</body>
+</html>
