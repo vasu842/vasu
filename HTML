@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Report a classroom problem</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Classroom Problem Report</h1>
+    <a href="login.html">HOD login</a>
+  </header>
+  <main>
+    <div class="card">
+      <p class="hint">Fan, light, AC or bench not working? Tell the HOD here.</p>
+
+      <label for="room">Class / room number</label>
+      <input id="room" placeholder="Example: CSE 2nd year, Room 204">
+
+      <label for="type">What is the problem?</label>
+      <select id="type">
+        <option>Fan</option>
+        <option>Light</option>
+        <option>AC</option>
+        <option>Bench</option>
+        <option>Other</option>
+      </select>
+
+      <label for="description">Details</label>
+      <textarea id="description" placeholder="Example: 2 fans near the back are not rotating"></textarea>
+
+      <label for="name">Your name (optional)</label>
+      <input id="name">
+
+      <button id="send">Send complaint</button>
+      <div id="msg" class="msg" role="status"></div>
+    </div>
+  </main>
+
+  <script>
+    const msg = document.getElementById("msg");
+    document.getElementById("send").onclick = async () => {
+      msg.className = "msg";
+      msg.textContent = "";
+      const body = {
+        room: document.getElementById("room").value,
+        type: document.getElementById("type").value,
+        description: document.getElementById("description").value,
+        name: document.getElementById("name").value,
+      };
+      if (!body.room.trim()) {
+        msg.className = "msg err";
+        msg.textContent = "Enter the class or room number.";
+        return;
+      }
+      try {
+        const res = await fetch("/api/complaints", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error((await res.json()).error);
+        msg.className = "msg ok";
+        msg.textContent = "Complaint sent. The HOD can see it now.";
+        document.getElementById("description").value = "";
+      } catch (e) {
+        msg.className = "msg err";
+        msg.textContent = "Could not send: " + e.message;
+      }
+    };
+  </script>
+</body>
+</html>

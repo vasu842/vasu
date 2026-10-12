@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HOD login</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>HOD Login</h1>
+    <a href="index.html">Back to complaint form</a>
+  </header>
+  <main>
+    <div class="card">
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password">
+      <button id="login">Log in</button>
+      <div id="msg" class="msg" role="status"></div>
+    </div>
+  </main>
+
+  <script>
+    const msg = document.getElementById("msg");
+    const pw = document.getElementById("password");
+
+    async function login() {
+      msg.className = "msg";
+      msg.textContent = "";
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw.value }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        sessionStorage.setItem("hodToken", data.token);
+        location.href = "dashboard.html";
+      } catch (e) {
+        msg.className = "msg err";
+        msg.textContent = e.message;
+      }
+    }
+
+    document.getElementById("login").onclick = login;
+    pw.addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+  </script>
+</body>
+</html>
