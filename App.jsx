@@ -7,7 +7,9 @@ const SVPCET_LNG = 79.4192;
 const MAX_RADIUS_KM = 0.5;
 const DEV_BYPASS_GPS = true; // set to false in production
 const MODEL_URL = '/models'; // face-api model files go in public/models
-const MATCH_THRESHOLD = 0.5; // lower = stricter
+const MATCH_THRESHOLD = 0.45;  // lower = stricter (max distance to accept a face)
+const MATCH_MARGIN = 0.06;    // best match must beat the 2nd best student by this much
+const SAME_PERSON_MAX = 0.8;  // all 5 registration angles must be one person
 
 // ---------------- STUDENTS ----------------
 const INITIAL_STUDENTS = [
@@ -348,6 +350,22 @@ export default function App() {
     setMode(null);
     const roll = targetRef.current;
     if (!isEnrolled) {
+      const poses = capturedRef.current;
+      const front = poses.front;
+      // 1) all 5 angles must belong to ONE person (nobody swapped in during registration)
+      const mixed = POSES.some((p) => p.key !== 'front' && faceapi.euclideanDistance(poses[p.key], front) > SAME_PERSON_MAX);
+      if (mixed) {
+        setStatusMessage('Registration rejected: all angles must be the same person. Please try again.');
+        return;
+      }
+      // 2) this face must not already be registered under another roll number
+      const dup = Object.entries(facesRef.current).find(
+        ([r, v]) => r !== roll && v.poses?.front && faceapi.euclideanDistance(front, v.poses.front) < MATCH_THRESHOLD
+      );
+      if (dup) {
+        setStatusMessage(`Registration rejected: this face is already registered for ${dup[0]}.`);
+        return;
+      }
       const updated = { ...facesRef.current, [roll]: { ay: academicYear(), poses: capturedRef.current } };
       setFaces(updated);
       save('svpcet_faces', updated);
@@ -378,9 +396,14 @@ export default function App() {
   // =====================================================
   //  B) CLASS ATTENDANCE KIOSK (blink -> match -> popup -> next student)
   // =====================================================
+  const newKiosk = () => ({
+    busy: false, cooldown: false, stage: 'blink', sawOpen: false, sawClosed: false,
+    candidate: null, count: 0, fail: 0, matched: null, turn: null, turnStart: 0, mism: 0,
+  });
+
   const resetKioskCycle = () => {
     const k = kioskRef.current;
-    k.sawOpen = false; k.sawClosed = false; k.blinked = false;
+    Object.assign(k, newKiosk(), { cooldown: k.cooldown, busy: k.busy });
     setRing(0);
   };
 
@@ -390,7 +413,7 @@ export default function App() {
     try {
       setSyncMsg('');
       setKioskOn(true);
-      kioskRef.current = { busy: false, cooldown: false, sawOpen: false, sawClosed: false, blinked: false };
+      kioskRef.current = newKiosk();
       setRing(0);
       await new Promise((r) => setTimeout(r, 50));
       await startCamera();
@@ -410,6 +433,43 @@ export default function App() {
     setKioskMsg('');
   };
 
+  // show result popup, then get ready for the NEXT student
+  const finishKiosk = (k, roll, reason) => {
+    k.cooldown = true;
+    let ms = 2500;
+    if (roll) {
+      const st = studentsRef.current.find((x) => x.rollNo === roll);
+      const already = logsRef.current[roll]?.[today()] === 'PRESENT';
+      markFor(roll, 'PRESENT');
+      setRing(1);
+      setPopup({ roll, name: st ? st.name : roll, already });
+      ms = 3000;
+    } else {
+      setRing(0);
+      setPopup({ failed: true, reason });
+    }
+    setTimeout(() => {
+      setPopup(null);
+      resetKioskCycle();
+      k.cooldown = false;
+      setKioskMsg(roll ? 'NEXT STUDENT - SLOWLY BLINK YOUR EYES' : 'SLOWLY BLINK YOUR EYES');
+    }, ms);
+  };
+
+  // rank every registered student by distance for one pose
+  const rankFaces = (descriptor, poseKey) =>
+    Object.entries(facesRef.current)
+      .filter(([, v]) => v.poses?.[poseKey])
+      .map(([roll, v]) => [roll, faceapi.euclideanDistance(descriptor, v.poses[poseKey])])
+      .sort((a, b) => a[1] - b[1]);
+
+  /*
+    One student at a time, 3 checks (like DigiLocker-style face auth):
+      1. BLINK    -> a live person
+      2. MATCH    -> front face must clearly match ONE roll number (3 frames in a row)
+      3. TURN     -> random side (left/right/up/down) must match the SAME roll number
+    If a second face appears, or the face changes, the whole check restarts.
+  */
   const kioskFrame = async () => {
     const k = kioskRef.current;
     const video = videoRef.current;
@@ -421,70 +481,86 @@ export default function App() {
         .withFaceLandmarks()
         .withFaceDescriptors();
 
-      if (res.length !== 1) {
-        setKioskMsg(res.length ? 'ONE STUDENT AT A TIME' : 'SHOW YOUR FACE');
+      if (res.length > 1) {
+        setKioskMsg('ONE STUDENT AT A TIME');
         resetKioskCycle();
         return;
       }
+      if (res.length === 0) {
+        setKioskMsg(k.stage === 'turn' ? kioskMsgTurn(k) : 'SHOW YOUR FACE');
+        if (k.stage !== 'turn') resetKioskCycle();
+        if (k.stage === 'turn' && Date.now() - k.turnStart > 15000) finishKiosk(k, null, 'Timed out');
+        return;
+      }
+
       const { landmarks, descriptor } = res[0];
       const pose = getPose(landmarks);
-      if (pose.yaw < 0.35 || pose.yaw > 0.65) {
+
+      if (k.stage !== 'turn' && (pose.yaw < 0.35 || pose.yaw > 0.65)) {
         setKioskMsg('LOOK STRAIGHT AT THE CAMERA');
         return;
       }
 
-      // Step 1: liveness - a full blink (open -> closed -> open)
-      if (!k.blinked) {
+      // ---- 1. BLINK
+      if (k.stage === 'blink') {
         const ear = getEAR(landmarks);
-        setRing(0.25);
+        setRing(0.2);
         setKioskMsg('SLOWLY BLINK YOUR EYES');
         if (ear > 0.26) {
-          if (k.sawClosed) k.blinked = true; else k.sawOpen = true;
+          if (k.sawClosed) k.stage = 'match'; else k.sawOpen = true;
         } else if (ear < 0.21 && k.sawOpen) {
           k.sawClosed = true;
         }
         return;
       }
 
-      // Step 2: recognise this face against every registered student (1:N)
-      setRing(0.7);
-      setKioskMsg('MATCHING...');
-      let bestRoll = null, bestDist = 99;
-      Object.entries(facesRef.current).forEach(([roll, v]) => {
-        const ref = v.poses?.front;
-        if (ref) {
-          const d = faceapi.euclideanDistance(descriptor, ref);
-          if (d < bestDist) { bestDist = d; bestRoll = roll; }
+      // ---- 2. MATCH FRONT FACE (1 : N)
+      if (k.stage === 'match') {
+        setRing(0.4);
+        setKioskMsg('MATCHING...');
+        const ranked = rankFaces(descriptor, 'front');
+        const [bestRoll, bestDist] = ranked[0] || [null, 99];
+        const second = ranked[1] ? ranked[1][1] : 99;
+        const ok = bestRoll && bestDist < MATCH_THRESHOLD && second - bestDist >= MATCH_MARGIN;
+        if (ok) {
+          if (k.candidate === bestRoll) k.count += 1; else { k.candidate = bestRoll; k.count = 1; }
+          k.fail = 0;
+        } else {
+          k.candidate = null; k.count = 0; k.fail += 1;
+          if (k.fail >= 10) return finishKiosk(k, null, 'Face not recognised');
         }
-      });
+        if (k.count >= 3) {
+          k.matched = k.candidate;
+          k.stage = 'turn';
+          k.turn = ['left', 'right', 'up', 'down'][Math.floor(Math.random() * 4)];
+          k.turnStart = Date.now();
+          k.mism = 0;
+        }
+        return;
+      }
 
-      k.cooldown = true;
-      if (bestRoll && bestDist < MATCH_THRESHOLD) {
-        const st = studentsRef.current.find((s) => s.rollNo === bestRoll);
-        const already = logsRef.current[bestRoll]?.[today()] === 'PRESENT';
-        markFor(bestRoll, 'PRESENT');
-        setRing(1);
-        setPopup({ roll: bestRoll, name: st ? st.name : bestRoll, already });
-        setTimeout(() => {
-          setPopup(null);
-          resetKioskCycle();
-          setKioskMsg('NEXT STUDENT - SLOWLY BLINK YOUR EYES');
-          k.cooldown = false;
-        }, 3000);
-      } else {
-        setRing(0);
-        setPopup({ roll: null, name: null, failed: true });
-        setTimeout(() => {
-          setPopup(null);
-          resetKioskCycle();
-          setKioskMsg('SLOWLY BLINK YOUR EYES');
-          k.cooldown = false;
-        }, 2500);
+      // ---- 3. TURN CHECK (same person on a random side)
+      if (k.stage === 'turn') {
+        const tp = POSES.find((x) => x.key === k.turn);
+        setRing(0.7);
+        setKioskMsg(kioskMsgTurn(k));
+        if (Date.now() - k.turnStart > 15000) return finishKiosk(k, null, 'Timed out');
+        if (!tp.ok(pose)) return;
+        const ranked = rankFaces(descriptor, k.turn);
+        const [bestRoll, bestDist] = ranked[0] || [null, 99];
+        if (bestRoll === k.matched && bestDist < tp.threshold) {
+          finishKiosk(k, k.matched, null);
+        } else {
+          k.mism += 1;
+          if (k.mism >= 5) finishKiosk(k, null, 'Face does not match - not the same person');
+        }
       }
     } finally {
       k.busy = false;
     }
   };
+
+  const kioskMsgTurn = (k) => (POSES.find((x) => x.key === k.turn)?.label || '').toUpperCase();
 
   // =====================================================
   //  C) HOD: add students in bulk
@@ -907,8 +983,8 @@ export default function App() {
             {popup.failed ? (
               <>
                 <div className="w-14 h-14 mx-auto rounded-full bg-red-100 text-red-600 flex items-center justify-center text-2xl font-bold">!</div>
-                <p className="mt-3 font-semibold text-slate-700">Face not recognised</p>
-                <p className="text-xs text-slate-500 mt-1">Register this student first, then try again.</p>
+                <p className="mt-3 font-semibold text-slate-700">{popup.reason || 'Face not recognised'}</p>
+                <p className="text-xs text-slate-500 mt-1">Attendance NOT marked. Register first or try again.</p>
               </>
             ) : (
               <>
