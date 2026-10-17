@@ -20,9 +20,10 @@ const INITIAL_STUDENTS = [
 // yaw  = nose position between jaw edges (0..1, ~0.5 = straight)
 // pitch = nose position between eye line and chin (higher = looking down)
 const POSES = [
-  { key: 'front', label: 'Look straight at the camera', ok: (p) => p.yaw > 0.42 && p.yaw < 0.58 && p.pitch < 0.58, threshold: 0.5 },
+  { key: 'front', label: 'Look straight at the camera', ok: (p) => p.yaw > 0.42 && p.yaw < 0.58 && p.pitch > 0.4 && p.pitch < 0.58, threshold: 0.5 },
   { key: 'left', label: 'Turn your face to the LEFT', ok: (p) => p.yaw > 0.65, threshold: 0.6 },
   { key: 'right', label: 'Turn your face to the RIGHT', ok: (p) => p.yaw < 0.35, threshold: 0.6 },
+  { key: 'up', label: 'Look UP', ok: (p) => p.pitch < 0.38 && p.yaw > 0.3 && p.yaw < 0.7, threshold: 0.6 },
   { key: 'down', label: 'Look DOWN', ok: (p) => p.pitch > 0.64 && p.yaw > 0.3 && p.yaw < 0.7, threshold: 0.6 },
 ];
 
@@ -39,12 +40,28 @@ const getPose = (landmarks) => {
 // ---------------- STORAGE HELPERS ----------------
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+// Academic year runs June -> May (e.g. 2026-27)
+const academicYear = () => {
+  const d = new Date();
+  const y = d.getMonth() >= 5 ? d.getFullYear() : d.getFullYear() - 1;
+  return `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+};
+// Face data is kept for ONE academic year only; older registrations are deleted automatically
+const loadFaces = () => {
+  const all = load('svpcet_faces', {});
+  const kept = {};
+  Object.entries(all).forEach(([roll, v]) => { if (v && v.ay === academicYear()) kept[roll] = v; });
+  if (Object.keys(kept).length !== Object.keys(all).length) save('svpcet_faces', kept);
+  return kept;
+};
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function App() {
   const [role, setRole] = useState(null);
   const [students, setStudents] = useState(() => load('svpcet_students', INITIAL_STUDENTS));
   const [bulkText, setBulkText] = useState('');
+  const [showPolicy, setShowPolicy] = useState(false);
+  const [consent, setConsent] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [rollNo, setRollNo] = useState('');
   const [password, setPassword] = useState('');
@@ -59,7 +76,7 @@ export default function App() {
   const [stepsDone, setStepsDone] = useState([]);
 
   // persisted data
-  const [faces, setFaces] = useState(() => load('svpcet_faces', {})); // {rollNo: {front:[..], left:[..], ...}}
+  const [faces, setFaces] = useState(loadFaces); // {rollNo: {ay:'2026-27', poses:{front:[..], left:[..], right:[..], up:[..], down:[..]}}}
   const [logs, setLogs] = useState(() => load('svpcet_logs', {}));    // {rollNo: {date: 'PRESENT'|'ABSENT'}}
 
   const videoRef = useRef(null);
@@ -220,14 +237,15 @@ export default function App() {
 
     // Pose is correct -> check identity (verify mode only)
     if (enrolled) {
-      const me = faces[currentUser.rollNo]?.[pose.key];
+      const me = faces[currentUser.rollNo]?.poses?.[pose.key];
       const myDist = me ? faceapi.euclideanDistance(descriptor, me) : 99;
 
       // face must belong to THIS roll number and no other roll number
       let bestRoll = null, bestDist = 99;
-      Object.entries(faces).forEach(([roll, p]) => {
-        if (p[pose.key]) {
-          const d = faceapi.euclideanDistance(descriptor, p[pose.key]);
+      Object.entries(faces).forEach(([roll, v]) => {
+        const ref = v.poses?.[pose.key];
+        if (ref) {
+          const d = faceapi.euclideanDistance(descriptor, ref);
           if (d < bestDist) { bestDist = d; bestRoll = roll; }
         }
       });
@@ -258,7 +276,7 @@ export default function App() {
   const finishScan = (enrolled) => {
     stopCamera();
     if (!enrolled) {
-      const updated = { ...faces, [currentUser.rollNo]: capturedRef.current };
+      const updated = { ...faces, [currentUser.rollNo]: { ay: academicYear(), poses: capturedRef.current } };
       setFaces(updated);
       save('svpcet_faces', updated);
       setMode(null);
@@ -268,6 +286,17 @@ export default function App() {
     setMode(null);
     markAttendance('PRESENT');
     setStatusMessage('Face verified from all sides! Attendance marked PRESENT.');
+  };
+
+  // Student can delete their own face data at any time (must re-register to mark attendance)
+  const deleteMyFace = () => {
+    if (!window.confirm('Delete your registered face data? You must register again to mark attendance.')) return;
+    const updated = { ...faces };
+    delete updated[currentUser.rollNo];
+    setFaces(updated);
+    save('svpcet_faces', updated);
+    setConsent(false);
+    setStatusMessage('Your face data has been deleted.');
   };
 
   // HOD: add many students at once. One per line: ROLLNO, Name
@@ -354,6 +383,9 @@ export default function App() {
                 Login to Portal
               </button>
             </form>
+            <p className="text-center text-xs text-slate-500 mt-4">
+              <button onClick={() => setShowPolicy(true)} className="text-blue-700 underline">Privacy Policy (Face Data)</button>
+            </p>
           </div>
         ) : role === 'student' ? (
           <div className="space-y-6">
@@ -376,7 +408,7 @@ export default function App() {
 
             <div className="bg-white p-6 rounded-xl shadow-md border border-slate-200 text-center">
               <h3 className="text-lg font-bold text-slate-800 mb-2">
-                {enrolled ? 'Daily Face Attendance (Front, Left, Right, Down)' : 'First-time Face Registration'}
+                {enrolled ? 'Daily Face Attendance (Front, Left, Right, Up, Down)' : 'First-time Face Registration'}
               </h3>
               <p className="text-sm text-slate-600 mb-4">{statusMessage}</p>
 
@@ -408,15 +440,31 @@ export default function App() {
                     </div>
                   )}
 
+                  {!enrolled && !mode && (
+                    <label className="flex items-start gap-2 justify-center text-xs text-slate-600 mb-3 text-left max-w-sm mx-auto">
+                      <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5" />
+                      <span>
+                        I agree to the capture of my face images (front, left, right, up, down) for attendance, as described in the{' '}
+                        <button type="button" onClick={() => setShowPolicy(true)} className="text-blue-700 underline">Privacy Policy</button>.
+                      </span>
+                    </label>
+                  )}
+
                   {locationVerified && !mode && (
                     <button
-                      onClick={startScan} disabled={!modelsReady}
+                      onClick={startScan} disabled={!modelsReady || (!enrolled && !consent)}
                       className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white font-bold px-6 py-2.5 rounded-lg transition"
                     >
                       {!modelsReady ? 'Loading face models...' : enrolled ? 'Start Face Scan & Mark Attendance' : 'Register My Face'}
                     </button>
                   )}
 
+                  {enrolled && !mode && (
+                    <p className="mt-3 text-xs text-slate-500">
+                      Face registered for {faces[currentUser.rollNo].ay}.{' '}
+                      <button onClick={deleteMyFace} className="text-red-600 underline">Delete my face data</button>
+                    </p>
+                  )}
                   <p className="mt-3 text-xs text-slate-500">
                     Today's status: <b className={todayStatus(currentUser.rollNo) === 'PRESENT' ? 'text-green-700' : 'text-red-600'}>
                       {todayStatus(currentUser.rollNo)}
@@ -492,6 +540,28 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {showPolicy && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setShowPolicy(false)}>
+          <div className="bg-white rounded-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-8" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-2xl font-bold text-slate-900">Privacy Policy</h2>
+            <p className="text-xs text-slate-500 mb-5">SVPCET Facial Recognition Attendance (FRS)</p>
+            {[
+              ['1. What face data is collected?', 'The app uses your device camera to capture your face during registration and attendance. During registration, face images are captured from different angles - front, left, right, up and down - to support accurate identity verification. Only numeric facial features (not photos) are kept.'],
+              ['2. How is it used?', 'Only for registration, identity verification and attendance marking. It is not used for advertising, marketing, tracking or any unrelated purpose.'],
+              ['3. Is it shared? Where is it stored?', 'It is not sold or shared with third parties. In this version the data is stored on the device/browser you register on. Attendance records visible to the HOD are limited to your roll number, name and present/absent status.'],
+              ['4. How long is it kept?', 'For one academic year (June to May). After that the face data is deleted automatically and you must register again at the start of the new academic year. You can also delete your face data yourself at any time from your dashboard.'],
+              ['5. Your consent', 'Face registration only starts after you tick the consent box. If you do not agree, you will not be able to register your face.'],
+            ].map(([h, t]) => (
+              <div key={h} className="mb-4">
+                <h3 className="font-bold text-slate-800 mb-1">{h}</h3>
+                <p className="text-sm text-slate-600">{t}</p>
+              </div>
+            ))}
+            <button onClick={() => setShowPolicy(false)} className="mt-2 bg-blue-700 hover:bg-blue-800 text-white font-bold px-5 py-2 rounded-lg">Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
